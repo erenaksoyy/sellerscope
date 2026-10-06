@@ -1,0 +1,17 @@
+{
+  "name": "sellerscope",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "cron": "node worker/run.js",
+    "cron:dry": "node worker/run.js --dry-run",
+    "api": "node api/server.js",
+    "digest": "node worker/send-digest.js",
+    "digest:dry": "node worker/send-digest.js --dry-run",
+    "test": "node --test \"worker/*.test.js\" \"api/*.test.js\""
+  },
+  "dependencies": {
+    "pg": "^8.11.0"
+  }
+}
