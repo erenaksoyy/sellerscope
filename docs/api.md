@@ -43,6 +43,9 @@ Korumalı uçlar `Authorization: Bearer <token>` ister (401 yoksa/bozuksa).
 - `sales`: aralıktaki tahmini satış toplamı. `change_pct`: ikinci yarı/günlük
   ortalamanın ilk yarıya göre değişimi; yeni ürünlerde `null`.
 - `rising` sıralaması `change_pct` büyükten küçüğe (`null` en üstte).
+- `review_count`: son bilinen yorum sayısı; kaynak hiç sayı vermediyse `null`
+  (0 değil). `price` ve `rating` de `null` olabilir. Sayısal alanlar JSON
+  sayısıdır (metin değil).
 - Liste 50 ürünle sınırlı. 400 hatalı parametre, 404 bilinmeyen kategori.
 
 ### GET /api/explosions?marketplace=&category=&range=7d&min_price=&max_price=&min_sales=&min_change=&limit=20

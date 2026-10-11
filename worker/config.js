@@ -27,6 +27,11 @@ export const ABROAD_MARKETPLACES = ["amazon_us", "amazon_de", "aliexpress_global
 // Gerçek çekimde kullanılan Apify aktörü (Apify'nin resmi e-ticaret aktörü).
 export const APIFY_ACTOR = "apify/e-commerce-scraping-tool";
 
+// Liste çekiminde yorum sayısı boş gelen ürünlerin sayısı, ürün sayfasından
+// ikinci bir çekimle tamamlanır (ürün başına ücretli, docs/cron.md).
+// Yalnız gerçek çıktıyla doğrulanan pazaryerleri; boş dizi = kapalı.
+export const REVIEW_BACKFILL_MARKETPLACES = ["amazon_tr"];
+
 // Kategori Best Sellers sayfa URL'leri. Bos olan hedefte gerçek çekim net
 // hata verir; tarayıcıda doğrulayıp doldur (docs/cron.md Adım 1).
 export const LISTING_URLS = {

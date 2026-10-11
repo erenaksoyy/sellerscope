@@ -147,15 +147,15 @@ export function createHandler({ query, jwtSecret }) {
            SELECT p.id,
                   COALESCE(SUM(s.estimated_sales_daily), 0)::int AS sales,
                   COALESCE(SUM(s.estimated_sales_daily)
-                    FILTER (WHERE s.captured_on > CURRENT_DATE - $5), 0)::int AS sales_recent,
+                    FILTER (WHERE s.captured_on > CURRENT_DATE - $5::int), 0)::int AS sales_recent,
                   COALESCE(SUM(s.estimated_sales_daily)
-                    FILTER (WHERE s.captured_on <= CURRENT_DATE - $5), 0)::int AS sales_prev,
+                    FILTER (WHERE s.captured_on <= CURRENT_DATE - $5::int), 0)::int AS sales_prev,
                   MIN(s.bestseller_rank) AS best_rank
            FROM products p
            JOIN marketplaces m ON m.id = p.marketplace_id
            JOIN categories c ON c.id = p.category_id
            LEFT JOIN product_snapshots s
-             ON s.product_id = p.id AND s.captured_on >= CURRENT_DATE - $6
+             ON s.product_id = p.id AND s.captured_on >= CURRENT_DATE - $6::int
            WHERE m.code = $1 AND c.slug = $2 AND p.is_active
              AND ($3::numeric IS NULL OR p.price >= $3)
              AND ($4::numeric IS NULL OR p.price <= $4)
@@ -165,8 +165,8 @@ export function createHandler({ query, jwtSecret }) {
                 p.price, p.currency, p.rating, p.review_count, p.bestseller_rank,
                 a.sales, a.best_rank,
                 CASE WHEN a.sales_prev > 0
-                     THEN ROUND(((a.sales_recent::float / $7) - (a.sales_prev::float / $8))
-                                / (a.sales_prev::float / $8) * 100, 1)
+                     THEN ROUND((((a.sales_recent::float / $7) - (a.sales_prev::float / $8))
+                                 / (a.sales_prev::float / $8) * 100)::numeric, 1)
                      WHEN a.sales_recent > 0 THEN NULL ELSE 0 END AS change_pct
          FROM agg a JOIN products p ON p.id = a.id
          ${order} LIMIT ${PAGE_LIMIT}`,
@@ -192,10 +192,10 @@ export function createHandler({ query, jwtSecret }) {
       );
       if (!found.rowCount) throw new HttpError(404, "Ürün bulunamadı.");
       const series = await query(
-        `SELECT captured_on AS date, price,
+        `SELECT to_char(captured_on, 'YYYY-MM-DD') AS date, price,
                 estimated_sales_daily AS sales, bestseller_rank AS rank
          FROM product_snapshots
-         WHERE product_id = $1 AND captured_on >= CURRENT_DATE - $2
+         WHERE product_id = $1 AND captured_on >= CURRENT_DATE - $2::int
          ORDER BY captured_on`,
         [id, days]
       );
@@ -241,27 +241,27 @@ export function createHandler({ query, jwtSecret }) {
                   a.rank_recent, a.rank_prev,
                   (a.rank_prev - a.rank_recent) AS rank_jump,
                   CASE WHEN a.sales_prev > 0
-                       THEN ROUND(((a.sales_recent::float / $7) - (a.sales_prev::float / $8))
-                                  / (a.sales_prev::float / $8) * 100, 1)
+                       THEN ROUND((((a.sales_recent::float / $7) - (a.sales_prev::float / $8))
+                                   / (a.sales_prev::float / $8) * 100)::numeric, 1)
                        WHEN a.sales_recent > 0 THEN NULL ELSE 0 END AS change_pct,
                   (a.sales_prev = 0 AND a.sales_recent > 0) AS is_new
            FROM (
              SELECT p2.id,
                     COALESCE(SUM(s.estimated_sales_daily), 0)::int AS sales,
                     COALESCE(SUM(s.estimated_sales_daily)
-                      FILTER (WHERE s.captured_on > CURRENT_DATE - $5), 0)::int AS sales_recent,
+                      FILTER (WHERE s.captured_on > CURRENT_DATE - $5::int), 0)::int AS sales_recent,
                     COALESCE(SUM(s.estimated_sales_daily)
-                      FILTER (WHERE s.captured_on <= CURRENT_DATE - $5), 0)::int AS sales_prev,
+                      FILTER (WHERE s.captured_on <= CURRENT_DATE - $5::int), 0)::int AS sales_prev,
                     MIN(s.bestseller_rank) AS best_rank,
                     MIN(s.bestseller_rank)
-                      FILTER (WHERE s.captured_on > CURRENT_DATE - $5) AS rank_recent,
+                      FILTER (WHERE s.captured_on > CURRENT_DATE - $5::int) AS rank_recent,
                     MIN(s.bestseller_rank)
-                      FILTER (WHERE s.captured_on <= CURRENT_DATE - $5) AS rank_prev
+                      FILTER (WHERE s.captured_on <= CURRENT_DATE - $5::int) AS rank_prev
              FROM products p2
              JOIN marketplaces m2 ON m2.id = p2.marketplace_id
              JOIN categories c2 ON c2.id = p2.category_id
              LEFT JOIN product_snapshots s
-               ON s.product_id = p2.id AND s.captured_on >= CURRENT_DATE - $6
+               ON s.product_id = p2.id AND s.captured_on >= CURRENT_DATE - $6::int
              WHERE m2.code = ANY($1) AND m2.is_active AND p2.is_active
                AND ($2::text IS NULL OR c2.slug = $2)
                AND ($3::numeric IS NULL OR p2.price >= $3)

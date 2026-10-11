@@ -8,7 +8,7 @@
 import "./env.js";
 import { MARKETPLACES, CATEGORIES, FETCH_LIMIT, ABROAD_MARKETPLACES } from "./config.js";
 import { fetchCategoryProducts } from "./fetchers.js";
-import { estimateDailySales } from "./estimate.js";
+import { estimateDailySales, reviewDelta } from "./estimate.js";
 
 const argv = process.argv.slice(2);
 const dryRun = argv.includes("--dry-run");
@@ -40,41 +40,51 @@ async function runDry() {
   const realMode = process.env.REAL_FETCH === "1";
   let totalProducts = 0;
   let totalSales = 0;
+  const failures = [];
   for (const t of targets()) {
-    const mp = MARKETPLACES[t.marketplace_code];
-    const today = await fetchCategoryProducts({
-      marketplaceCode: t.marketplace_code,
-      categorySlug: t.category_slug,
-      limit: FETCH_LIMIT,
-      dayIndex,
-    });
-    totalProducts += today.length;
-    if (realMode) {
-      // Gerçek modda ikinci çekim hem ücretli hem anlamsız (aynı veri);
-      // satış tahmini DB'deki dünkü veriyle canlı koşuda hesaplanır.
-      const sample = today.slice(0, 3).map((p) => `"${p.title.slice(0, 40)}..."`).join(", ");
-      console.log(`${t.marketplace_code} / ${t.category_slug}: ${today.length} ürün çekildi. Örnek: ${sample}`);
-      continue;
+    try {
+      const mp = MARKETPLACES[t.marketplace_code];
+      const today = await fetchCategoryProducts({
+        marketplaceCode: t.marketplace_code,
+        categorySlug: t.category_slug,
+        limit: FETCH_LIMIT,
+        dayIndex,
+      });
+      totalProducts += today.length;
+      if (realMode) {
+        // Gerçek modda ikinci çekim hem ücretli hem anlamsız (aynı veri);
+        // satış tahmini DB'deki dünkü veriyle canlı koşuda hesaplanır.
+        const sample = today.slice(0, 3).map((p) => `"${p.title.slice(0, 40)}..."`).join(", ");
+        console.log(`${t.marketplace_code} / ${t.category_slug}: ${today.length} ürün çekildi. Örnek: ${sample}`);
+        continue;
+      }
+      const yesterday = await fetchCategoryProducts({
+        marketplaceCode: t.marketplace_code,
+        categorySlug: t.category_slug,
+        limit: FETCH_LIMIT,
+        dayIndex: dayIndex - 1,
+      });
+      const prevById = new Map(yesterday.map((p) => [p.externalId, p.reviewCount]));
+      let catSales = 0;
+      for (const p of today) {
+        const delta = p.reviewCount - (prevById.get(p.externalId) ?? 0);
+        catSales += estimateDailySales(delta, mp.reviewCoefficient);
+      }
+      totalSales += catSales;
+      console.log(`${t.marketplace_code} / ${t.category_slug}: ${today.length} ürün, tahmini ${catSales} satış/gün`);
+    } catch (err) {
+      const label = `${t.marketplace_code}/${t.category_slug}`;
+      console.error(`HATA [${label}]: ${err.message}`);
+      failures.push(label);
     }
-    const yesterday = await fetchCategoryProducts({
-      marketplaceCode: t.marketplace_code,
-      categorySlug: t.category_slug,
-      limit: FETCH_LIMIT,
-      dayIndex: dayIndex - 1,
-    });
-    const prevById = new Map(yesterday.map((p) => [p.externalId, p.reviewCount]));
-    let catSales = 0;
-    for (const p of today) {
-      const delta = p.reviewCount - (prevById.get(p.externalId) ?? 0);
-      catSales += estimateDailySales(delta, mp.reviewCoefficient);
-    }
-    totalSales += catSales;
-    console.log(`${t.marketplace_code} / ${t.category_slug}: ${today.length} ürün, tahmini ${catSales} satış/gün`);
   }
   if (realMode) {
     console.log(`TOPLAM: ${totalProducts} ürün çekildi (DB'ye yazılmadı, satış tahmini canlı koşuda)`);
   } else {
     console.log(`TOPLAM: ${totalProducts} ürün, tahmini ${totalSales} satış/gün (DB'ye yazılmadı)`);
+  }
+  if (failures.length > 0) {
+    console.error(`BAŞARISIZ (${failures.length}): ${failures.join(", ")}`);
   }
 }
 
@@ -92,51 +102,52 @@ async function runLive() {
     }
     let totalProducts = 0;
     let totalSales = 0;
+    const failures = [];
     for (const t of targets) {
-      const mp = MARKETPLACES[t.marketplace_code];
-      const items = await fetchCategoryProducts({
-        marketplaceCode: t.marketplace_code,
-        categorySlug: t.category_slug,
-        limit: FETCH_LIMIT,
-        dayIndex,
-      });
-      await client.query("BEGIN");
       try {
-        let catSales = 0;
-        for (const item of items) {
-          const { id, prevReviewCount } = await db.upsertProduct(
-            client, t.marketplace_id, t.category_id, t.country_code, item
-          );
-          // İlk görülen üründe delta bilinmez -> 0 satış (yanlış şişirme yok).
-          const isFirstSeen = prevReviewCount === 0 && item.reviewCount > 0 && !(await seenBefore(client, id));
-          const delta = isFirstSeen ? 0 : item.reviewCount - prevReviewCount;
-          const sales = estimateDailySales(delta, mp.reviewCoefficient);
-          await db.insertSnapshot(client, id, item, Math.max(0, delta), sales);
-          catSales += sales;
+        const mp = MARKETPLACES[t.marketplace_code];
+        const items = await fetchCategoryProducts({
+          marketplaceCode: t.marketplace_code,
+          categorySlug: t.category_slug,
+          limit: FETCH_LIMIT,
+          dayIndex,
+        });
+        await client.query("BEGIN");
+        try {
+          let catSales = 0;
+          for (const item of items) {
+            const { id, prevReviewCount } = await db.upsertProduct(
+              client, t.marketplace_id, t.category_id, t.country_code, item
+            );
+            // İlk görülen ya da sayısı bilinmeyen üründe delta 0 -> 0 satış.
+            const delta = reviewDelta(prevReviewCount, item.reviewCount);
+            const sales = estimateDailySales(delta, mp.reviewCoefficient);
+            await db.insertSnapshot(client, id, item, Math.max(0, delta), sales);
+            catSales += sales;
+          }
+          await db.refreshCategoryStats(client, t.marketplace_id, t.category_id, t.country_code);
+          await client.query("COMMIT");
+          totalProducts += items.length;
+          totalSales += catSales;
+          console.log(`${t.marketplace_code} / ${t.category_slug}: ${items.length} ürün yazıldı, tahmini ${catSales} satış/gün`);
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
         }
-        await db.refreshCategoryStats(client, t.marketplace_id, t.category_id, t.country_code);
-        await client.query("COMMIT");
-        totalProducts += items.length;
-        totalSales += catSales;
-        console.log(`${t.marketplace_code} / ${t.category_slug}: ${items.length} ürün yazıldı, tahmini ${catSales} satış/gün`);
       } catch (err) {
-        await client.query("ROLLBACK");
-        throw err;
+        const label = `${t.marketplace_code}/${t.category_slug}`;
+        console.error(`HATA [${label}]: ${err.message}`);
+        failures.push(label);
       }
     }
     console.log(`TOPLAM: ${totalProducts} ürün, tahmini ${totalSales} satış/gün`);
+    if (failures.length > 0) {
+      console.error(`BAŞARISIZ (${failures.length}/${targets.length}): ${failures.join(", ")}`);
+    }
   } finally {
     client.release();
     await db.closePool();
   }
-}
-
-async function seenBefore(client, productId) {
-  const { rows } = await client.query(
-    `SELECT 1 FROM product_snapshots WHERE product_id = $1 AND captured_on < CURRENT_DATE LIMIT 1`,
-    [productId]
-  );
-  return rows.length > 0;
 }
 
 try {

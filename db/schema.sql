@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS products (
   price          NUMERIC(12,2),
   currency       CHAR(3),
   rating         NUMERIC(2,1),                  -- 0.0 - 5.0
-  review_count   INT NOT NULL DEFAULT 0,
+  review_count   INT,                           -- son bilinen sayı; NULL = hiç bilinmedi
   bestseller_rank INT,                          -- kategorideki anlık sıra
   country_code   CHAR(2) NOT NULL,              -- ürünün satıldığı ülke
   first_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS product_snapshots (
   product_id            UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
   captured_on           DATE NOT NULL DEFAULT CURRENT_DATE,
   price                 NUMERIC(12,2),
-  review_count          INT NOT NULL DEFAULT 0,
+  review_count          INT,                      -- NULL = o gün sayı alınamadı
   rating                NUMERIC(2,1),
   bestseller_rank       INT,
   review_count_delta    INT NOT NULL DEFAULT 0,   -- düne göre yorum artışı

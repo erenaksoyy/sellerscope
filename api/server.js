@@ -1,5 +1,6 @@
 // HTTP adaptörü: node:http -> saf handler. DB havuzu worker ile paylaşılır.
 import http from "node:http";
+import { fileURLToPath } from "node:url";
 import "../worker/env.js";
 import { createHandler } from "./handler.js";
 
@@ -62,7 +63,8 @@ export function startServer({ port = PORT, query, jwtSecret } = {}) {
   });
 }
 
-const isMain = process.argv[1] === new URL(import.meta.url).pathname;
+// fileURLToPath: yolda boşluk/Türkçe karakter olsa da argv ile eşleşir.
+const isMain = process.argv[1] === fileURLToPath(import.meta.url);
 if (isMain) {
   if (!process.env.JWT_SECRET) {
     console.error("JWT_SECRET tanımlı değil (.env.example'e bak).");

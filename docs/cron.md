@@ -53,7 +53,21 @@ adından olmalı, yoksa Resend reddeder.
 
 Varsayılan mod mock veridir (`REAL_FETCH` tanımsız). Gerçek çekim
 `apify/e-commerce-scraping-tool` aktörünü kullanır (Apify'nin resmi
-e-ticaret aktörü, Best Sellers listeleme sayfalarını sıra bilgisiyle çeker).
+e-ticaret aktörü, Best Sellers listeleme sayfalarını çeker).
+
+Aktör çıktısının bilinen sınırları (Ekim 2026 çekimlerinde ölçüldü):
+- Sıra alanı gelmez ve öğeler liste sırasıyla dönmez. Amazon'da sıra, ürün
+  bağlantısındaki `ref=zg_bs_..._sccl_N` değerinden okunur; bağlantıda yoksa
+  veri setindeki sıra yazılır.
+- amazon.com.tr liste çekiminde 1000 ve üzeri yorumlu ürünlerde `reviewCount`
+  boş gelir (iki çekimde 100 üründen 38'i; amazon.com'da 50'de 1). Bu
+  ürünlerin sayısı, ürün sayfası doğrudan verilerek (`detailsUrls`) ikinci bir
+  çekimle tamamlanır: `worker/config.js` içindeki
+  `REVIEW_BACKFILL_MARKETPLACES` (boş dizi kapatır). Yine alınamazsa sayı
+  `NULL` tutulur ve o gün satış tahmini 0 olur.
+- Ürün sayfası çekiminden yalnız yorum sayısı alınır: o modda fiyat binlik
+  ayracı yüzünden yanlış gelir (1364 TL'lik ürün 1.364 olarak), puan boş gelir.
+  Bağlantıya `/-/en/` ya da `?language=en_US` eklemek sonucu değiştirmez.
 
 Adım 1 — Kategori URL'lerini doldur:
 1. Tarayıcıda Amazon/Trendyol/AliExpress Best Sellers (çok satanlar)
@@ -78,6 +92,10 @@ Maliyet notu (ölçülen, Free plan, Ekim 2026): ürün başına ~$0.006.
 (10 kategori x 50 ürün = ~500 sonuç) ≈ $3. $5 krediyle testler +
 1 tam koşu çıkar. Fiyatlar değişebilir, güncel tarifeyi aktörün
 store sayfasından kontrol et.
+
+Yorum sayısı tamamlama çekimi ayrıca ücretlidir: sayısı boş gelen ürün başına
+~$0.009 (ölçülen: 4 ürün $0.036). amazon.com.tr'de ürünlerin yaklaşık %40'ında
+gerektiği için 2 kategorilik koşuya ≈ $0.35 ekler.
 
 Alternatifler (gerekirse): Amazon için `junglee/amazon-bestsellers`
 (.com.tr yok), Trendyol için `great_saint/trendyol-scraper`

@@ -72,15 +72,15 @@ export async function topRising(query, marketplace, category_id, limit = ITEMS_P
                 FILTER (WHERE s.captured_on <= CURRENT_DATE - 3), 0)::int AS sales_prev
        FROM products p
        JOIN marketplaces m ON m.id = p.marketplace_id
+       JOIN product_snapshots s
+         ON s.product_id = p.id AND s.captured_on >= CURRENT_DATE - 7
        WHERE m.code = $1 AND p.category_id = $2 AND p.is_active
-         AND EXISTS (SELECT 1 FROM product_snapshots s
-                     WHERE s.product_id = p.id AND s.captured_on >= CURRENT_DATE - 7)
        GROUP BY p.id
      )
      SELECT p.title, p.url, p.price, p.currency, a.sales,
             CASE WHEN a.sales_prev > 0
-                 THEN ROUND(((a.sales_recent::float / 3) - (a.sales_prev::float / 4))
-                            / (a.sales_prev::float / 4) * 100, 1)
+                 THEN ROUND((((a.sales_recent::float / 3) - (a.sales_prev::float / 4))
+                             / (a.sales_prev::float / 4) * 100)::numeric, 1)
                  WHEN a.sales_recent > 0 THEN NULL ELSE 0 END AS change_pct
      FROM agg a JOIN products p ON p.id = a.id
      ORDER BY change_pct DESC NULLS FIRST, sales DESC

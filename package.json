@@ -9,7 +9,7 @@
     "api": "node api/server.js",
     "digest": "node worker/send-digest.js",
     "digest:dry": "node worker/send-digest.js --dry-run",
-    "test": "node --test \"worker/*.test.js\" \"api/*.test.js\""
+    "test": "node --test \"worker/*.test.js\" \"api/*.test.js\" \"db/*.test.js\""
   },
   "dependencies": {
     "pg": "^8.11.0"

@@ -1,5 +1,8 @@
 import pg from "pg";
 
+// pg NUMERIC'i (fiyat, puan, yüzde) metin döndürür; API sözleşmesi sayı ister.
+pg.types.setTypeParser(pg.types.builtins.NUMERIC, parseFloat);
+
 let pool = null;
 
 export function getPool() {
@@ -33,12 +36,14 @@ export async function loadTargets(client) {
 }
 
 // Ürünü günceller, önceki yorum sayısını döndürür (delta hesabı için).
+// Ürün yeniyse ya da sayı hiç bilinmediyse null döner. Bugünkü sayı
+// bilinmiyorsa (null) son bilinen değer korunur, üzerine yazılmaz.
 export async function upsertProduct(client, mpId, categoryId, country, item) {
   const prev = await client.query(
     `SELECT id, review_count FROM products WHERE marketplace_id = $1 AND external_id = $2`,
     [mpId, item.externalId]
   );
-  const prevReviewCount = prev.rowCount ? prev.rows[0].review_count : 0;
+  const prevReviewCount = prev.rowCount ? prev.rows[0].review_count : null;
   const { rows } = await client.query(
     `INSERT INTO products
        (marketplace_id, category_id, external_id, title, brand, url, image_url,
@@ -50,7 +55,7 @@ export async function upsertProduct(client, mpId, categoryId, country, item) {
        brand = EXCLUDED.brand, url = EXCLUDED.url, image_url = EXCLUDED.image_url,
        seller_name = EXCLUDED.seller_name, price = EXCLUDED.price,
        currency = EXCLUDED.currency, rating = EXCLUDED.rating,
-       review_count = EXCLUDED.review_count,
+       review_count = COALESCE(EXCLUDED.review_count, products.review_count),
        bestseller_rank = EXCLUDED.bestseller_rank, last_seen_at = now()
      RETURNING id`,
     [mpId, categoryId, item.externalId, item.title, item.brand, item.url,
@@ -89,14 +94,17 @@ export async function refreshCategoryStats(client, mpId, categoryId, country) {
             (SELECT s2.product_id FROM product_snapshots s2
               JOIN products p2 ON p2.id = s2.product_id
               WHERE p2.marketplace_id = $1 AND p2.category_id = $2
+                AND p2.country_code = $3
                 AND s2.captured_on = CURRENT_DATE
               ORDER BY s2.estimated_sales_daily DESC, s2.bestseller_rank ASC NULLS LAST
               LIMIT 1)
      FROM product_snapshots s
      JOIN products p ON p.id = s.product_id
      WHERE p.marketplace_id = $1 AND p.category_id = $2
+       AND p.country_code = $3
        AND s.captured_on = CURRENT_DATE
      ON CONFLICT (marketplace_id, category_id, stats_on) DO UPDATE SET
+       country_code = EXCLUDED.country_code,
        product_count = EXCLUDED.product_count, avg_price = EXCLUDED.avg_price,
        total_estimated_sales = EXCLUDED.total_estimated_sales,
        top_product_id = EXCLUDED.top_product_id`,
