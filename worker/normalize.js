@@ -110,6 +110,13 @@ export function extractExternalId(url) {
   return `url-${(h >>> 0).toString(36)}`;
 }
 
+// Amazon Best Sellers bağlantısındaki liste sırası:
+// ".../dp/B007CTYVRK/ref=zg_bs_g_home_d_sccl_6/..." -> 6. Yoksa null.
+export function rankFromUrl(url) {
+  const m = String(url ?? "").match(/\/ref=zg_bs[a-z0-9_]*_sccl_(\d+)/i);
+  return m ? Number(m[1]) : null;
+}
+
 // Ham aktör öğesi -> normalize ürün. Geçersizse null (liste dışı bırakılır).
 export function normalizeProduct(raw, marketplaceCode, index) {
   if (!raw || typeof raw !== "object") return null;
@@ -120,30 +127,58 @@ export function normalizeProduct(raw, marketplaceCode, index) {
   const url = first(raw.url, raw.link, raw.productUrl, raw.detailUrl);
   if (!title || !url) return null;
 
+  // Rank: çeşitli alan adları + string->sayı dönüşümü. Aktör sıra vermezse
+  // Best Sellers bağlantısındaki sıra; o da yoksa veri setindeki sıra (aktör
+  // öğeleri çekim bitiş sırasıyla döndürür, liste sırası değildir).
   const rankRaw = first(raw.rank, raw.position, raw.rankPosition, raw.bestsellerRank);
-  const rank = Number.isInteger(rankRaw) && rankRaw > 0 ? rankRaw : index + 1;
+  const rankNum = typeof rankRaw === "string" ? parseInt(rankRaw, 10) : rankRaw;
+  const rank = Number.isInteger(rankNum) && rankNum > 0
+    ? rankNum
+    : rankFromUrl(url) ?? index + 1;
 
   const extra = extraProps(raw);
   const cr = parseCustomerReviews(extra["customer reviews"]);
   const slogan = raw.brand && typeof raw.brand === "object" ? raw.brand.slogan : null;
 
+  // External ID: Trendyol contentId, AliExpress productId, Amazon ASIN (URL'den)
+  const externalId = first(raw.contentId, raw.productId, null)
+    ? String(first(raw.contentId, raw.productId))
+    : extractExternalId(String(url));
+
+  // Satıcı adı: Trendyol merchantName, AliExpress storeInfo.storeName
+  const storeName = raw.storeInfo && typeof raw.storeInfo === "object"
+    ? raw.storeInfo.storeName ?? raw.storeInfo.name
+    : null;
+
+  // Yorum / sipariş sayısı: AliExpress orders/totalOrders alanlarını da dene.
+  // Bulunamazsa null (bilinmiyor): 0 yazılırsa sayı geri geldiği gün tamamı
+  // o günün artışı sayılır.
+  const reviewCount = cr.reviewCount
+    ?? parseCount(first(
+      raw.reviewsCount, raw.reviewCount, raw.ratingsTotal, raw.ratingsCount,
+      raw.numberOfRatings, raw.totalReviews, raw.review_count,
+      raw.orders, raw.totalOrders
+    ))
+    ?? null;
+
   return {
-    externalId: extractExternalId(String(url)),
+    externalId,
     title: String(title).slice(0, 500),
     brand: cleanBrand(extra.brand)
       ?? cleanBrand(extra.manufacturer)
       ?? (typeof raw.brand === "string" ? cleanBrand(raw.brand) : null)
       ?? cleanBrand(slogan)
-      ?? cleanBrand(raw.manufacturer),
+      ?? cleanBrand(raw.manufacturer)
+      ?? cleanBrand(raw.brandName),
     url: String(url),
-    imageUrl: first(raw.imageUrl, raw.image, raw.thumbnail, raw.thumbnailImage, null) ?? null,
-    sellerName: first(raw.sellerName, raw.seller, raw.storeName, raw.merchantName, null) ?? null,
-    price: parsePrice(first(raw.price, raw.offers?.price, raw.priceValue, raw.currentPrice, raw.salePrice)),
+    imageUrl: first(raw.imageUrl, raw.image, raw.thumbnail, raw.thumbnailImage, raw.imgUrl, raw.mainImage, null) ?? null,
+    sellerName: first(raw.sellerName, raw.seller, raw.storeName, raw.merchantName, storeName, null) ?? null,
+    price: parsePrice(first(raw.price, raw.offers?.price, raw.priceValue, raw.currentPrice, raw.salePrice, raw.sellingPrice)),
     currency: first(raw.currency, raw.currencyCode, raw.offers?.priceCurrency, mp.currency),
-    rating: cr.rating ?? parseRating(first(raw.rating, raw.stars, raw.averageRating)),
-    reviewCount: cr.reviewCount
-      ?? parseCount(first(raw.reviewsCount, raw.reviewCount, raw.ratingsTotal, raw.ratingsCount, raw.numberOfRatings, raw.totalReviews, raw.review_count))
-      ?? 0,
+    rating: cr.rating
+      ?? parseRating(first(raw.rating, raw.stars, raw.averageRating, raw.ratingScore, raw.starRating)),
+    reviewCount,
     rank,
   };
 }
+

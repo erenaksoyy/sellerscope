@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS categories (
   external_id    TEXT,                          -- pazaryerindeki kategori id/url parçası
   name           TEXT NOT NULL,                 -- Ev & Mutfak
   slug           TEXT NOT NULL,                 -- ev-mutfak
+  group_slug     TEXT,                          -- ülkeler arası ortak kategori: ev-mutfak, oyuncak
   parent_id      INT REFERENCES categories(id) ON DELETE SET NULL,
   level          SMALLINT NOT NULL DEFAULT 1,
   is_active      BOOLEAN NOT NULL DEFAULT TRUE,
@@ -45,7 +46,7 @@ CREATE TABLE IF NOT EXISTS products (
   price          NUMERIC(12,2),
   currency       CHAR(3),
   rating         NUMERIC(2,1),                  -- 0.0 - 5.0
-  review_count   INT NOT NULL DEFAULT 0,
+  review_count   INT,                           -- son bilinen sayı; NULL = hiç bilinmedi
   bestseller_rank INT,                          -- kategorideki anlık sıra
   country_code   CHAR(2) NOT NULL,              -- ürünün satıldığı ülke
   first_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -63,7 +64,7 @@ CREATE TABLE IF NOT EXISTS product_snapshots (
   product_id            UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
   captured_on           DATE NOT NULL DEFAULT CURRENT_DATE,
   price                 NUMERIC(12,2),
-  review_count          INT NOT NULL DEFAULT 0,
+  review_count          INT,                      -- NULL = o gün sayı alınamadı
   rating                NUMERIC(2,1),
   bestseller_rank       INT,
   review_count_delta    INT NOT NULL DEFAULT 0,   -- düne göre yorum artışı
@@ -100,6 +101,7 @@ CREATE TABLE IF NOT EXISTS users (
   plan          TEXT NOT NULL DEFAULT 'monthly',
   trial_ends_at TIMESTAMPTZ,
   digest_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  is_admin      BOOLEAN NOT NULL DEFAULT FALSE,  -- TR kararını elle düzeltebilir
   is_active     BOOLEAN NOT NULL DEFAULT TRUE,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -128,6 +130,47 @@ CREATE TABLE IF NOT EXISTS email_log (
   sent_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   item_count INT NOT NULL DEFAULT 0,
   PRIMARY KEY (user_id, week)
+);
+
+-- 10. Günlük kur (TCMB): 1 birim yabancı para = kaç TL
+CREATE TABLE IF NOT EXISTS fx_rates (
+  rate_on   DATE NOT NULL,
+  currency  CHAR(3) NOT NULL,
+  try_rate  NUMERIC(14,6) NOT NULL,
+  PRIMARY KEY (rate_on, currency)
+);
+
+-- 11. Türkiye karşılaştırması: yurt dışı ürün TR'de var mı (ürün başına son durum).
+-- Üç katmanın kararı ayrı tutulur; geçerli olan status = insan > yapay zekâ > kural.
+CREATE TABLE IF NOT EXISTS tr_checks (
+  product_id   UUID PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+  query        TEXT,                            -- TR sitelerinde aranan ifade
+  sources      TEXT[] NOT NULL DEFAULT '{}',    -- aranabilen siteler (amazon_tr, hepsiburada_tr)
+  rule_status  TEXT CHECK (rule_status IN ('found')),   -- kural "yok" diyemez
+  ai_status    TEXT CHECK (ai_status IN ('found', 'similar', 'not_found')),
+  human_status TEXT CHECK (human_status IN ('found', 'similar', 'not_found')),
+  human_note   TEXT,
+  human_by     UUID REFERENCES users(id) ON DELETE SET NULL,
+  human_at     TIMESTAMPTZ,
+  status       TEXT NOT NULL CHECK (status IN ('found', 'similar', 'not_found', 'unknown')),
+  match_count  INT NOT NULL DEFAULT 0,
+  min_price    NUMERIC(12,2),                   -- TL; eşleşenlerin en düşüğü
+  checked_at   TIMESTAMPTZ                      -- son otomatik kontrol; NULL = yalnız elle karar
+);
+CREATE INDEX IF NOT EXISTS idx_tr_checks_status ON tr_checks(status);
+
+-- 12. TR'de bulunan ilanlar (her kontrolde yenilenir)
+CREATE TABLE IF NOT EXISTS tr_matches (
+  id          BIGSERIAL PRIMARY KEY,
+  product_id  UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  source      TEXT NOT NULL,                    -- amazon_tr, hepsiburada_tr
+  title       TEXT NOT NULL,
+  url         TEXT NOT NULL,
+  image_url   TEXT,
+  seller_name TEXT,
+  price       NUMERIC(12,2),                    -- TL
+  kind        TEXT NOT NULL CHECK (kind IN ('same', 'similar')),
+  UNIQUE (product_id, url)
 );
 
 -- MVP örnek sorgu: Amazon DE, Ev kategorisi, son 7 gün en hızlı yükselen 10 ürün

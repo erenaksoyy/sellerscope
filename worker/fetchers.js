@@ -1,6 +1,9 @@
-import { MARKETPLACES, APIFY_ACTOR, LISTING_URLS } from "./config.js";
+import {
+  MARKETPLACES, APIFY_ACTOR, LISTING_URLS, REVIEW_BACKFILL_MARKETPLACES, DIRECT_LIST_MARKETPLACES,
+} from "./config.js";
 import { runActorAndGetItems } from "./apify.js";
-import { normalizeProduct } from "./normalize.js";
+import { fetchAmazonList } from "./amazon-lists.js";
+import { normalizeProduct, parseCount, extractExternalId } from "./normalize.js";
 
 // Deterministik mock veri: aynı pazaryeri+kategori+gün için hep aynı sonuç,
 // gün değişince yorum sayıları artar (delta/satış hesabı test edilebilsin diye).
@@ -56,10 +59,69 @@ export function mockCategoryProducts({ marketplaceCode, categorySlug, limit, day
   return items;
 }
 
+const ASIN_RE = /^[A-Z0-9]{10}$/;
+
+// Liste çekimi amazon.com.tr'de 1000+ yorumlu ürünlerde yorum sayısını boş
+// döndürüyor; aynı ürün sayfası doğrudan (detailsUrls) verilince sayı geliyor.
+// Sayısı boş kalan ürünler için ikinci, küçük bir çekim yapar ve tamamlanan
+// ürün sayısını döndürür. Yalnız yorum sayısı alınır: bu modda fiyat binlik
+// ayracı yüzünden yanlış ("1.364"), puan boş gelir. Çekim başarısız olursa
+// sayılar boş kalır, liste verisi kaybedilmez.
+export async function backfillReviewCounts(items, marketplaceCode, runActor = runActorAndGetItems) {
+  if (!REVIEW_BACKFILL_MARKETPLACES.includes(marketplaceCode)) return 0;
+  const missing = items.filter((p) => p.reviewCount === null && ASIN_RE.test(p.externalId));
+  if (missing.length === 0) return 0;
+  const baseUrl = MARKETPLACES[marketplaceCode].baseUrl;
+  const asins = [...new Set(missing.map((p) => p.externalId))];
+  let rawItems;
+  try {
+    rawItems = await runActor({
+      actorId: APIFY_ACTOR,
+      input: {
+        detailsUrls: asins.map((asin) => ({ url: `${baseUrl}/dp/${asin}` })),
+        additionalProperties: true,
+        maxProductResults: asins.length,
+      },
+      token: process.env.APIFY_TOKEN,
+      maxItems: asins.length,
+    });
+  } catch (err) {
+    console.warn(`UYARI: yorum sayısı tamamlama çekimi başarısız (${marketplaceCode}): ${err.message}`);
+    return 0;
+  }
+  const counts = new Map();
+  for (const raw of rawItems) {
+    const asin = [raw?.inputUrl, raw?.url]
+      .map((u) => extractExternalId(String(u ?? "")))
+      .find((id) => ASIN_RE.test(id ?? ""));
+    const count = parseCount(raw?.reviewCount);
+    if (asin && count !== null) counts.set(asin, count);
+  }
+  let filled = 0;
+  for (const p of missing) {
+    if (counts.has(p.externalId)) {
+      p.reviewCount = counts.get(p.externalId);
+      filled++;
+    }
+  }
+  return filled;
+}
+
+const DIRECT_FETCH_GAP_MS = 3000;
+let lastDirectFetchAt = 0;
+
 async function realFetchCategoryProducts({ marketplaceCode, categorySlug, limit }) {
   const url = LISTING_URLS[marketplaceCode]?.[categorySlug];
   if (!url) {
     throw new Error(`LISTING_URLS eksik: ${marketplaceCode}/${categorySlug} (docs/cron.md Adım 1).`);
+  }
+  if (DIRECT_LIST_MARKETPLACES.includes(marketplaceCode)) {
+    // Ücretsiz yol: liste sayfası doğrudan çekilir. Art arda isteklerde araya
+    // boşluk konur; hata verirse ücretli çekime kendiliğinden geçilmez.
+    const wait = lastDirectFetchAt + DIRECT_FETCH_GAP_MS - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    lastDirectFetchAt = Date.now();
+    return fetchAmazonList({ url, marketplaceCode, limit });
   }
   const rawItems = await runActorAndGetItems({
     actorId: APIFY_ACTOR,
@@ -73,7 +135,11 @@ async function realFetchCategoryProducts({ marketplaceCode, categorySlug, limit 
     if (n) items.push(n);
   }
   if (items.length === 0) {
-    throw new Error(`Apify 0 geçerli ürün döndü: ${marketplaceCode}/${categorySlug}.`);
+    console.warn(`UYARI: Apify 0 geçerli ürün döndü: ${marketplaceCode}/${categorySlug} (ham: ${rawItems.length} öğe).`);
+  }
+  const filled = await backfillReviewCounts(items, marketplaceCode);
+  if (filled > 0) {
+    console.log(`${marketplaceCode} / ${categorySlug}: ${filled} ürünün yorum sayısı ürün sayfasından tamamlandı.`);
   }
   return items;
 }

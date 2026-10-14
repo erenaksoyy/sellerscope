@@ -4,15 +4,21 @@
 //   REAL_FETCH=1 node worker/run.js               -> gerçek çekim (Apify, ücretli)
 //   node worker/run.js --marketplace=amazon_de    -> tek pazaryerine indirgeme
 //   node worker/run.js --abroad                   -> yalnız yurt dışı hedefler (sık çekim için)
+//   node worker/run.js --free                     -> yalnız ücretsiz (doğrudan) çekilen pazaryerleri
 
 import "./env.js";
-import { MARKETPLACES, CATEGORIES, FETCH_LIMIT, ABROAD_MARKETPLACES } from "./config.js";
+import {
+  MARKETPLACES, CATEGORIES, FETCH_LIMIT, ABROAD_MARKETPLACES, DIRECT_LIST_MARKETPLACES,
+} from "./config.js";
 import { fetchCategoryProducts } from "./fetchers.js";
-import { estimateDailySales } from "./estimate.js";
+import { estimateDailySales, reviewDelta } from "./estimate.js";
+import { fetchRates } from "./fx.js";
 
 const argv = process.argv.slice(2);
 const dryRun = argv.includes("--dry-run");
 const abroadOnly = argv.includes("--abroad");
+// --free: gerçek çekimde Apify'a (ücretli) hiç gidilmez.
+const freeOnly = argv.includes("--free");
 const onlyArg = argv.find((a) => a.startsWith("--marketplace="));
 const onlyMarketplace = onlyArg ? onlyArg.split("=")[1] : null;
 const dayIndex = Math.floor(Date.now() / 86400000);
@@ -26,11 +32,17 @@ if (onlyMarketplace && abroadOnly && !ABROAD_MARKETPLACES.includes(onlyMarketpla
   process.exit(1);
 }
 
+if (onlyMarketplace && freeOnly && !DIRECT_LIST_MARKETPLACES.includes(onlyMarketplace)) {
+  console.error(`--free ile yalnız ücretsiz çekilen pazaryeri seçilebilir: ${onlyMarketplace}`);
+  process.exit(1);
+}
+
 function targets() {
   // Dry-run: DB yok, config'den hedef listesi. Gerçek koşu: DB'den okunur.
-  const codes = onlyMarketplace
+  const all = onlyMarketplace
     ? [onlyMarketplace]
     : abroadOnly ? [...ABROAD_MARKETPLACES] : Object.keys(MARKETPLACES);
+  const codes = freeOnly ? all.filter((c) => DIRECT_LIST_MARKETPLACES.includes(c)) : all;
   return codes.flatMap((code) =>
     CATEGORIES[code].map((slug) => ({ marketplace_code: code, category_slug: slug }))
   );
@@ -40,41 +52,51 @@ async function runDry() {
   const realMode = process.env.REAL_FETCH === "1";
   let totalProducts = 0;
   let totalSales = 0;
+  const failures = [];
   for (const t of targets()) {
-    const mp = MARKETPLACES[t.marketplace_code];
-    const today = await fetchCategoryProducts({
-      marketplaceCode: t.marketplace_code,
-      categorySlug: t.category_slug,
-      limit: FETCH_LIMIT,
-      dayIndex,
-    });
-    totalProducts += today.length;
-    if (realMode) {
-      // Gerçek modda ikinci çekim hem ücretli hem anlamsız (aynı veri);
-      // satış tahmini DB'deki dünkü veriyle canlı koşuda hesaplanır.
-      const sample = today.slice(0, 3).map((p) => `"${p.title.slice(0, 40)}..."`).join(", ");
-      console.log(`${t.marketplace_code} / ${t.category_slug}: ${today.length} ürün çekildi. Örnek: ${sample}`);
-      continue;
+    try {
+      const mp = MARKETPLACES[t.marketplace_code];
+      const today = await fetchCategoryProducts({
+        marketplaceCode: t.marketplace_code,
+        categorySlug: t.category_slug,
+        limit: FETCH_LIMIT,
+        dayIndex,
+      });
+      totalProducts += today.length;
+      if (realMode) {
+        // Gerçek modda ikinci çekim hem ücretli hem anlamsız (aynı veri);
+        // satış tahmini DB'deki dünkü veriyle canlı koşuda hesaplanır.
+        const sample = today.slice(0, 3).map((p) => `"${p.title.slice(0, 40)}..."`).join(", ");
+        console.log(`${t.marketplace_code} / ${t.category_slug}: ${today.length} ürün çekildi. Örnek: ${sample}`);
+        continue;
+      }
+      const yesterday = await fetchCategoryProducts({
+        marketplaceCode: t.marketplace_code,
+        categorySlug: t.category_slug,
+        limit: FETCH_LIMIT,
+        dayIndex: dayIndex - 1,
+      });
+      const prevById = new Map(yesterday.map((p) => [p.externalId, p.reviewCount]));
+      let catSales = 0;
+      for (const p of today) {
+        const delta = p.reviewCount - (prevById.get(p.externalId) ?? 0);
+        catSales += estimateDailySales(delta, mp.reviewCoefficient);
+      }
+      totalSales += catSales;
+      console.log(`${t.marketplace_code} / ${t.category_slug}: ${today.length} ürün, tahmini ${catSales} satış/gün`);
+    } catch (err) {
+      const label = `${t.marketplace_code}/${t.category_slug}`;
+      console.error(`HATA [${label}]: ${err.message}`);
+      failures.push(label);
     }
-    const yesterday = await fetchCategoryProducts({
-      marketplaceCode: t.marketplace_code,
-      categorySlug: t.category_slug,
-      limit: FETCH_LIMIT,
-      dayIndex: dayIndex - 1,
-    });
-    const prevById = new Map(yesterday.map((p) => [p.externalId, p.reviewCount]));
-    let catSales = 0;
-    for (const p of today) {
-      const delta = p.reviewCount - (prevById.get(p.externalId) ?? 0);
-      catSales += estimateDailySales(delta, mp.reviewCoefficient);
-    }
-    totalSales += catSales;
-    console.log(`${t.marketplace_code} / ${t.category_slug}: ${today.length} ürün, tahmini ${catSales} satış/gün`);
   }
   if (realMode) {
     console.log(`TOPLAM: ${totalProducts} ürün çekildi (DB'ye yazılmadı, satış tahmini canlı koşuda)`);
   } else {
     console.log(`TOPLAM: ${totalProducts} ürün, tahmini ${totalSales} satış/gün (DB'ye yazılmadı)`);
+  }
+  if (failures.length > 0) {
+    console.error(`BAŞARISIZ (${failures.length}): ${failures.join(", ")}`);
   }
 }
 
@@ -86,57 +108,69 @@ async function runLive() {
     let targets = await db.loadTargets(client);
     if (onlyMarketplace) targets = targets.filter((t) => t.marketplace_code === onlyMarketplace);
     if (abroadOnly) targets = targets.filter((t) => ABROAD_MARKETPLACES.includes(t.marketplace_code));
+    if (freeOnly) targets = targets.filter((t) => DIRECT_LIST_MARKETPLACES.includes(t.marketplace_code));
     if (targets.length === 0) {
       console.error("Aktif hedef bulunamadı (marketplaces/categories seed edildi mi?)");
       process.exit(1);
     }
+    if (process.env.REAL_FETCH === "1") {
+      // Günün kuru (fiyatları TL'ye çevirmek için). Alınamazsa çekim sürer.
+      try {
+        const { date, rates } = await fetchRates();
+        await db.upsertFxRates(client, date, rates);
+        console.log(`Kur (${date}): ${Object.entries(rates).map(([c, r]) => `1 ${c} = ${r} TL`).join(", ")}`);
+      } catch (err) {
+        console.warn(`UYARI: kur alınamadı: ${err.message}`);
+      }
+    }
     let totalProducts = 0;
     let totalSales = 0;
+    const failures = [];
     for (const t of targets) {
-      const mp = MARKETPLACES[t.marketplace_code];
-      const items = await fetchCategoryProducts({
-        marketplaceCode: t.marketplace_code,
-        categorySlug: t.category_slug,
-        limit: FETCH_LIMIT,
-        dayIndex,
-      });
-      await client.query("BEGIN");
       try {
-        let catSales = 0;
-        for (const item of items) {
-          const { id, prevReviewCount } = await db.upsertProduct(
-            client, t.marketplace_id, t.category_id, t.country_code, item
-          );
-          // İlk görülen üründe delta bilinmez -> 0 satış (yanlış şişirme yok).
-          const isFirstSeen = prevReviewCount === 0 && item.reviewCount > 0 && !(await seenBefore(client, id));
-          const delta = isFirstSeen ? 0 : item.reviewCount - prevReviewCount;
-          const sales = estimateDailySales(delta, mp.reviewCoefficient);
-          await db.insertSnapshot(client, id, item, Math.max(0, delta), sales);
-          catSales += sales;
+        const mp = MARKETPLACES[t.marketplace_code];
+        const items = await fetchCategoryProducts({
+          marketplaceCode: t.marketplace_code,
+          categorySlug: t.category_slug,
+          limit: FETCH_LIMIT,
+          dayIndex,
+        });
+        await client.query("BEGIN");
+        try {
+          let catSales = 0;
+          for (const item of items) {
+            const { id, prevReviewCount } = await db.upsertProduct(
+              client, t.marketplace_id, t.category_id, t.country_code, item
+            );
+            // İlk görülen ya da sayısı bilinmeyen üründe delta 0 -> 0 satış.
+            const delta = reviewDelta(prevReviewCount, item.reviewCount);
+            const sales = estimateDailySales(delta, mp.reviewCoefficient);
+            await db.insertSnapshot(client, id, item, Math.max(0, delta), sales);
+            catSales += sales;
+          }
+          await db.refreshCategoryStats(client, t.marketplace_id, t.category_id, t.country_code);
+          await client.query("COMMIT");
+          totalProducts += items.length;
+          totalSales += catSales;
+          console.log(`${t.marketplace_code} / ${t.category_slug}: ${items.length} ürün yazıldı, tahmini ${catSales} satış/gün`);
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
         }
-        await db.refreshCategoryStats(client, t.marketplace_id, t.category_id, t.country_code);
-        await client.query("COMMIT");
-        totalProducts += items.length;
-        totalSales += catSales;
-        console.log(`${t.marketplace_code} / ${t.category_slug}: ${items.length} ürün yazıldı, tahmini ${catSales} satış/gün`);
       } catch (err) {
-        await client.query("ROLLBACK");
-        throw err;
+        const label = `${t.marketplace_code}/${t.category_slug}`;
+        console.error(`HATA [${label}]: ${err.message}`);
+        failures.push(label);
       }
     }
     console.log(`TOPLAM: ${totalProducts} ürün, tahmini ${totalSales} satış/gün`);
+    if (failures.length > 0) {
+      console.error(`BAŞARISIZ (${failures.length}/${targets.length}): ${failures.join(", ")}`);
+    }
   } finally {
     client.release();
     await db.closePool();
   }
-}
-
-async function seenBefore(client, productId) {
-  const { rows } = await client.query(
-    `SELECT 1 FROM product_snapshots WHERE product_id = $1 AND captured_on < CURRENT_DATE LIMIT 1`,
-    [productId]
-  );
-  return rows.length > 0;
 }
 
 try {

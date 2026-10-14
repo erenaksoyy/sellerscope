@@ -6,10 +6,13 @@
   "scripts": {
     "cron": "node worker/run.js",
     "cron:dry": "node worker/run.js --dry-run",
+    "tr-check": "node worker/tr-check.js",
+    "tr-check:dry": "node worker/tr-check.js --dry-run",
+    "llm:check": "node worker/llm.js --check",
     "api": "node api/server.js",
     "digest": "node worker/send-digest.js",
     "digest:dry": "node worker/send-digest.js --dry-run",
-    "test": "node --test \"worker/*.test.js\" \"api/*.test.js\""
+    "test": "node --test \"worker/*.test.js\" \"api/*.test.js\" \"db/*.test.js\""
   },
   "dependencies": {
     "pg": "^8.11.0"
