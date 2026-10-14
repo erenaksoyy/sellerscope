@@ -20,3 +20,14 @@ test("--abroad ile TR pazaryeri birlikte seçilemez", async () => {
     /yalnız yurt dışı/
   );
 });
+
+test("--free dry-run yalnız ücretsiz çekilen pazaryerlerini hedefler", async () => {
+  const { stdout } = await run("node", ["worker/run.js", "--dry-run", "--free"], { timeout: 30000 });
+  assert.match(stdout, /amazon_us \/ toys-games/);
+  assert.match(stdout, /amazon_de \/ oyuncak/);
+  assert.doesNotMatch(stdout, /aliexpress_global|amazon_tr|trendyol_tr/);
+  await assert.rejects(
+    run("node", ["worker/run.js", "--dry-run", "--free", "--marketplace=aliexpress_global"], { timeout: 30000 }),
+    /yalnız ücretsiz/
+  );
+});

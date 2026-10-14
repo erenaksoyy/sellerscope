@@ -1,5 +1,8 @@
-import { MARKETPLACES, APIFY_ACTOR, LISTING_URLS, REVIEW_BACKFILL_MARKETPLACES } from "./config.js";
+import {
+  MARKETPLACES, APIFY_ACTOR, LISTING_URLS, REVIEW_BACKFILL_MARKETPLACES, DIRECT_LIST_MARKETPLACES,
+} from "./config.js";
 import { runActorAndGetItems } from "./apify.js";
+import { fetchAmazonList } from "./amazon-lists.js";
 import { normalizeProduct, parseCount, extractExternalId } from "./normalize.js";
 
 // Deterministik mock veri: aynı pazaryeri+kategori+gün için hep aynı sonuç,
@@ -104,10 +107,21 @@ export async function backfillReviewCounts(items, marketplaceCode, runActor = ru
   return filled;
 }
 
+const DIRECT_FETCH_GAP_MS = 3000;
+let lastDirectFetchAt = 0;
+
 async function realFetchCategoryProducts({ marketplaceCode, categorySlug, limit }) {
   const url = LISTING_URLS[marketplaceCode]?.[categorySlug];
   if (!url) {
     throw new Error(`LISTING_URLS eksik: ${marketplaceCode}/${categorySlug} (docs/cron.md Adım 1).`);
+  }
+  if (DIRECT_LIST_MARKETPLACES.includes(marketplaceCode)) {
+    // Ücretsiz yol: liste sayfası doğrudan çekilir. Art arda isteklerde araya
+    // boşluk konur; hata verirse ücretli çekime kendiliğinden geçilmez.
+    const wait = lastDirectFetchAt + DIRECT_FETCH_GAP_MS - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    lastDirectFetchAt = Date.now();
+    return fetchAmazonList({ url, marketplaceCode, limit });
   }
   const rawItems = await runActorAndGetItems({
     actorId: APIFY_ACTOR,

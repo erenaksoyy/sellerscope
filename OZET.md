@@ -1,17 +1,21 @@
 # Trend Paneli — Yapılanlar Özeti
 
-Son güncelleme: 11 Ekim 2026
+Son güncelleme: 14 Ekim 2026
 
 ## Proje fikri
 
-E-ticaret satıcılarına (dropshipper'lar + yurt dışından Türkiye'ye ürün getirenler) aylık üyelikle satılan trend paneli: Hangi pazaryerinde, hangi ülkede, hangi kategori/ürün en çok satıyor; kaç adet satmış (tahmini). Cimri/Akakçe'de bu fonksiyon yok; farkımız ülke + pazaryeri + kategori filtreli satış istihbaratı.
+Yurt dışı pazarlarını tarayan fırsat paneli (Helium10 benzeri, ama odak Türkiye'ye taşınabilecek ürünler): hangi ülkede, hangi kategoride ne çok satıyor ya da hızla yükseliyor; bu ürün **Türkiye'de var mı, varsa kaça**. Asıl değer "yurt dışında satıyor, Türkiye'de yok" listesi. Çıkış örneği: yurt dışında gördüğü çocuk eğitim ürününü Türkiye'de üretip rakipsiz satan Trendyol satıcısı. Hedef kullanıcı: girişimciler ve alanında dünyada ne çıktığını izleyenler. Ürüne tıklayan satıldığı siteye gider.
 
-## MVP kapsamı (kilitlenen)
+İlk fikir (6 Ekim) genel bir satış istihbaratı paneliydi; 11 Ekim'de hedef yukarıdaki gibi netleşti. Türkiye pazaryerleri artık taranan değil, karşılaştırılan taraf.
 
-- **Pazaryerleri:** Amazon TR/US/DE, Trendyol TR, AliExpress global (10 kategori, kategori başına 50 ürün)
-- **MVP dışı:** Alibaba B2B, Hepsiburada, N11
-- **Fiyatlandırma:** tek aylık plan + 7 gün deneme, tek limit favori sayısı (50)
-- **Satış adedi her zaman "tahmini":** `yorum artışı × kategori katsayısı`, panelde etiketli gösterilir
+## Kapsam
+
+- **Taranan pazarlar:** Amazon ABD ve Almanya (7 kategori, liste başına 30 ürün, ücretsiz doğrudan çekim). AliExpress, Amazon TR, Trendyol listeleri kodda duruyor ama Apify ile ücretli
+- **Türkiye karşılaştırması:** amazon.com.tr + Hepsiburada araması (ücretsiz). Trendyol doğrudan erişimi engelliyor
+- **Bütçe kısıtı:** Apify ücretsiz planda ($5/ay); ücretli yapay zekâ anahtarı yok, Gemini ve NVIDIA'nın ücretsiz katmanları kullanılıyor
+- **Şimdilik yalnız backend;** arayüz en sona
+- **Fiyatlandırma (ilk plan):** tek aylık plan + 7 gün deneme, tek limit favori sayısı (50)
+- **Satış adedi her zaman "tahmini":** `yorum artışı × kategori katsayısı`
 - **Teknik tarz:** frameworksuz sade Node.js, tek bağımlılık `pg`
 
 ## Yapılanlar (sırayla)
@@ -81,11 +85,35 @@ E-ticaret satıcılarına (dropshipper'lar + yurt dışından Türkiye'ye ürün
 - **Yorum sayısı tamamlama:** `worker/fetchers.js` `backfillReviewCounts` — liste çekiminde sayısı boş kalan amazon.com.tr ürünleri için ürün sayfasından (`detailsUrls`) ikinci, küçük çekim; yalnız yorum sayısı alınır. Aç/kapa: `config.js` `REVIEW_BACKFILL_MARKETPLACES`. İki ücretli denemeyle bulundu (toplam $0.10): `/-/en/` ve `?language=en_US` etkisiz; ürün sayfası doğrudan verilince liste çekiminde boş gelen 2 üründe sayı geldi (1066 ve 1757). Gerçek 50 ürünlük koşuda henüz denenmedi
 - `npm test`: **71/71 geçiyor** (+9 entegrasyon, +1 sunucu, +5 normalize/estimate, +3 fetchers)
 
+### 12. Yurt dışı fırsat paneli: Türkiye karşılaştırması + ücretsiz çekim (11 Ekim 2026)
+- **Fizibilite (hepsi ücretsiz denendi):** Trendyol doğrudan çekimi engelliyor (Cloudflare 403; zorlanmadı). amazon.com.tr ve Hepsiburada arama sayfaları doğrudan okunabiliyor. amazon.com / amazon.de Best Sellers ve New Releases sayfaları doğrudan okunabiliyor (ilk 30 ürün; sıra, puan, yorum sayısı, fiyat hazır). Movers & Shakers doğrudan çekimde boş geliyor. Amazon yaklaşık bir düzine art arda istekten sonra bir kez bot doğrulama sayfası döndürdü
+- **Ücretsiz liste çekimi:** `worker/amazon-lists.js` + `html.js`; `config.js` `DIRECT_LIST_MARKETPLACES` (amazon_us, amazon_de). `run.js --free` Apify'a hiç gitmez. Engel gelirse liste hata verir, ücretli yola kendiliğinden geçilmez
+- **Kur:** `worker/fx.js` TCMB günlük XML → `fx_rates`; API her üründe `price_try` döndürür
+- **Türkiye karşılaştırması:** `worker/tr-search.js` (iki sitenin arama ayrıştırıcıları; "sonuç yok" ile "sayfa okunamadı" ayrı), `tr-match.js` (kural katmanı + yapay zekâ katmanı), `llm.js` (Gemini + NVIDIA, işe göre model zinciri, yalnız fetch), `tr-check.js` (iş: aday seçimi, engellenen siteyi bırakma, kota bitince kurala düşme). Sonuçlar `tr_checks` / `tr_matches`
+- **Üç katmanlı karar:** kural yalnız "var" diyebilir; yapay zekâ var / benzeri var / bulunamadı der; insan (yönetici) düzeltir ve kararı otomatik kontrolde korunur. Üçü ayrı sütunda, geçerli olan `insan > yapay zekâ > kural`
+- **API:** her ürün satırında `price_try` + `tr_status` + `tr_min_price`; `tr=` süzgeci; yeni `GET /api/opportunities` (varsayılan TR'de bulunamayanlar), `GET /api/markets` (ülke → kategori), `PUT /api/products/:id/tr-status` ve `GET /api/tr-review` (yönetici, `users.is_admin`)
+- **Ortak kategori:** `categories.group_slug` (ev-mutfak, elektronik, spor-outdoor, oyuncak); yeni Oyuncak kategorileri (amazon_us `toys-games`, amazon_de `oyuncak`); göç `003_tr_checks.sql`
+- **Gerçek koşu (ücretsiz):** amazon.com 3 liste + amazon.de 4 liste = 209 ürün, hepsinde yorum sayısı ve sıra var. 6 ürün Türkiye'de arandı: 2'si kural katmanıyla bulundu (Stanley Quencher: yurt dışı 1.386 TL, Türkiye 1.585 TL; AirPods Pro 3: 9.028 TL / 11.499 TL), 4 jenerik ürün "karar yok" (yapay zekâ ya da insan gerekiyor)
+- **Ücretli denemeler (12 Ekim, toplam $0.0025, üçü de olumsuz):** genel Apify aktörü Trendyol'da anahtar kelime aramasından yanıt alamadı; arama adresi liste olarak verilince 0 ürün döndü; amazon.com Movers & Shakers sayfasından 0 ürün çıkardı. Sonuç gelmediği için ürün ücreti yazılmadı
+- **Yapay zekâ modeli (12 Ekim):** gerçek anahtarla denendi, varsayılan `gemini-3.5-flash-lite` oldu (ücretsiz katmanda dakikada 15, günde 500 istek; çağrı 1-2 sn). Önceki varsayılan `gemini-flash-latest` Gemini 3.8 Flash'a gidiyor: günde 20 istek, çağrıların çoğu HTTP 503. Karşılaştırma tablosu `docs/cron.md` içinde. İlk yapay zekâlı koşu (5 ürün, amazon.de): 2 "var" (Pokémon 30. yıl kutusu: yurt dışı ≈ 2.760 TL, Türkiye 29.999 TL; De'Longhi EcoDecalk), 3 "benzeri var"
+- **Yapay zekâ katmanı sağlamlaştırma (13 Ekim):** (1) ürün başına iki arama: yapay zekâ başlıktan marka, model ve Türkçe ürün türünü çıkarır, kod "marka + model" ve "ürün türü" aramalarını kurar (önceden tek arama vardı ve model markayı düşürüyordu). (2) Yapay zekâsız bakılmış ürünler 20 saat sonra yeniden aday. (3) HTTP 500/503'te yeniden deneme + yedek model `gemini-3.1-flash-lite` (asıl model 13 Ekim'deki denemelerde aralıklı olarak HTTP 503 ve zaman aşımı verdi, yedek çalıştı). (4) Yapay zekâ karar veremez ve kural da bulamazsa sonuç yazılmaz (eski kayıt ezilmez). Gerçek koşu: De'Longhi EcoDecalk'ta "aynı ürün" ilanı 1'den 8'e çıktı; Echo Dot Kids yurt dışı 1.656 TL / Türkiye 7.762 TL; Echo Dot 1.656 TL / 5.402 TL
+- **İkinci yapay zekâ sağlayıcısı: NVIDIA (14 Ekim):** 9 model aynı testten geçti (10 ürünün arama ifadesi + 26 ilanlık 3 karar testi). İlan kararında Nemotron 3 Super ve GLM 5.3 hatasız (Gemini 2 hata), ama Nemotron'un Türkçe arama ifadeleri bozuk, GLM yavaş (35-75 sn); 6 model 90 sn'de yanıt vermedi ya da kapalıydı. Sonuç: iş başına model zinciri. Arama ifadeleri Gemini > GLM 5.3; ilan kararları Nemotron 3 Super > GLM 5.3 > Gemini. Her hatada sıradaki modele geçilir. Tablo `docs/cron.md` içinde
+- `npm test`: **111/111 geçiyor** (+35: liste ve arama ayrıştırıcıları, kural/yapay zekâ katmanı, kur, iş akışı, yeni uçlar, entegrasyon; +5: çift arama, yeniden deneme, model zinciri, NVIDIA istek biçimi)
+
 ## Henüz yapılmayanlar
 
 - **Frontend:** bilerek en sona bırakıldı (kullanıcı isteği)
 - **Üyelik ve ödeme:** deneme bitince erişim kesme + iyzico/Stripe + webhook
 - **Sertleştirme:** hız limiti (rate-limit), sağlık kontrolü, loglama
+- **Fırsat listesi (`tr=not_found`) hâlâ boş:** 16 üründe "bulunamadı" hiç çıkmadı (5 "var", 7 "benzeri var", 4 "karar yok"). Ürün türü araması hemen her zaman benzer bir ürün getiriyor; "bulunamadı" yalnız gerçekten yeni türde ürünlerde beklenir. Bakılan ürünlerin çoğu bilinen türler (pil, matara, çarşaf). Asıl hedef olan "yurt dışında var, Türkiye'de yok" için ya çok daha fazla ürüne (özellikle oyuncak ve niş kategoriler) bakmak ya da "benzeri var" içinden zayıf eşleşmeleri ayırmak gerekecek; henüz karar verilmedi
+- **amazon.com.tr bot doğrulaması (14 Ekim):** gerçek koşunun ilk aramasında amazon.com.tr doğrulama sayfası döndürdü; kod siteyi o koşu için bıraktı, 5 ürün yalnız Hepsiburada'da arandı. Zorlanmadı. Çift arama sitelere giden istek sayısını ikiye katladı (ürün başına 4 sayfa); engelin sürüp sürmediği bir sonraki koşuda görülecek
+- **NVIDIA ucu kararsız:** ilk gerçek koşuda Nemotron 3 Super iki karardan sonra bağlantı hatası verdi, GLM 5.3 zaman aşımına uğradı; kalan kararları Gemini verdi ve birinde hata yaptı (Bezente balonu için Atom balonuna "aynı ürün"). Ücretsiz erişim deneme/prototip amaçlı; canlıya çıkmadan kullanım şartlarına bakılmalı
+- **Yapay zekâ katmanının açık zayıflıkları:** (1) sonuç aramaya çıkan ilk 5 ilana bağlı ve koşudan koşuya değişebiliyor (Pokémon 30. yıl kutusu 12 Ekim'de "var", 13 Ekim'de "benzeri var"). (2) Aynı markanın adı yakın modellerini "aynı ürün" sayabiliyor (JBL Vibe Beam 2 / Wave Beam 2). (3) Marka + model araması yabancı dildeki model adını kullanıyor, Türkiye'de başka adla satılanı kaçırabilir
+- **Trendyol karşılaştırmada yok:** en büyük Türk pazaryeri. Doğrudan erişim engelli, genel Apify aktörü de sonuç alamıyor (`trendyol_tr` liste çekimi de bu yüzden büyük olasılıkla çalışmaz). Çalışan yol Trendyol'a özel aktör `great_saint/trendyol-scraper`: 12 Ekim'de tek aramayla denendi, 54 saniyede 6 ilan döndü (başlık, fiyat, puan, bağlantı), $0.07 tuttu. Koda bağlanmadı. İlk 6 ilan aranan modeli içermiyordu (aynı markanın başka kulaklıkları), yani "benzeri var" demeye yeter ama birebir fiyata yetmeyebilir. Akla yatan kullanım: yalnız ücretsiz sitelerde "bulunamadı" çıkan ürünleri Trendyol'da doğrulamak (ayrıntı `docs/cron.md` bölüm 4)
+- **"Hızla yükselenler" alınamıyor:** Movers & Shakers ne doğrudan ne Apify ile geliyor. Ani ivme için elde kalan yol kendi hesabımız: liste taraması artık ücretsiz olduğundan her gün koşulabilir, sıra ve yorum farkı günlük çıkar
+- **"Yeni çıkanlar" bağlanmadı:** New Releases doğrudan okunabiliyor; liste türü ayrımı gerekiyor (taslak: `product_list_entries` tablosu)
+- **Doğrudan çekim kırılgan:** sayfa yapısı değişirse ya da site engellerse durur; yalnız ev bağlantısından denendi. Sitelerin kullanım şartları otomatik erişimi kısıtlayabilir
+- **Kural katmanı kaba:** aksesuar/kitap ilanını "aynı ürün" sanabilir; ürünün Türkiye fiyatını bu yüzden yanlış gösterebilir
 - **Bilinen veri sorunları (açık):**
   - Yorum sayısı tamamlama yalnız amazon.com.tr'de ve yalnız 2 üründe doğrulandı; amazon.de (binlik ayracı aynı) hiç gerçek çekilmedi. Maliyeti sayısı boş ürün başına ~$0.009
   - Fırsat (yapılmadı): ürün sayfası çekimi Amazon'un kendi satış sinyalini de döndürüyor (`monthlyPurchaseVolume`: "Geçen ay 600 adetten fazla satın alındı") ve kategori sırasını (`bestsellerRanks`); `yorum × katsayı` tahminini kalibre etmek ya da değiştirmek için kullanılabilir
@@ -93,9 +121,12 @@ E-ticaret satıcılarına (dropshipper'lar + yurt dışından Türkiye'ye ürün
   - Listeden çıkıp günler sonra dönen ürünün birikmiş artışı tek güne yazılır
   - `change_pct` pencereleri: 7 gün seçilince 8 gün okunur, eski dönem 5 gün olup 4'e bölünür
   - Trendyol/AliExpress ürün kimliği gerçek çıktıyla doğrulanmadı; AliExpress'te sipariş sayısı yorum gibi × 25 çarpılıyor
-  - `docs/cron.md` günlük cron örneğinde `REAL_FETCH=1` yok (o haliyle gerçek DB'ye mock ürün yazar)
-- **Kullanıcıya kalan manuel işler:** Apify token + 10 kategori `LISTING_URLS` doldurma, Resend hesabı + alan adı doğrulama, Postgres kurup schema+seed+migration çalıştırma, `reviewCoefficient` kalibrasyonu
+  - `REAL_FETCH=1` olmadan çalışan `run.js` gerçek DB'ye mock ürün yazar (belgede uyarı var, kodda engel yok)
+  - Aynı ASIN iki kategoride çıkarsa ürün son yazılan kategoriye geçer (amazon.de'de 120 satırdan 1'i)
+- **Kullanıcıya kalan manuel işler:** bir kullanıcıyı yönetici yapmak (`UPDATE users SET is_admin = TRUE WHERE email = '...'`), Resend hesabı + alan adı doğrulama, `reviewCoefficient` kalibrasyonu
 
 ## Durum notu
 
-11 Ekim 2026: yerel Postgres (`trendpanel`) kurulu; şema, seed ve 001/002 göçleri uygulanmış durumda. İçinde tek günlük gerçek çekim var (6 Ekim, amazon_tr, 2 kategori, 99 ürün); tek gün olduğu için bütün satış tahminleri henüz 0. API bu klasörden açılıyor ve gerçek veriyle yanıt veriyor. Resend ile gerçek gönderim denenmedi. Sıradaki adım: ikinci bir günün gerçek çekimi (yorum sayısı tamamlamayı 50 ürünlük koşuda doğrular ve ilk satış tahminlerini üretir), ardından **üyelik ve ödeme mi, sertleştirme mi?**
+14 Ekim 2026: yerel Postgres (`trendpanel`) kurulu; şema, seed ve 001/002/003 göçleri uygulanmış durumda. İçinde gerçek veri var: amazon_us 90 ürün ve amazon_de 119 ürün (11 Ekim, ücretsiz çekim), amazon_tr 99 ürün (6 Ekim, Apify), günün kuru, 20 ürünün Türkiye karşılaştırması (8 "var", 8 "benzeri var", 4 "karar yok"; 6'sı yalnız kural katmanıyla, 14'ü yapay zekâyla; 14 Ekim). Her pazaryerinde tek günlük veri olduğu için satış tahminleri henüz 0; ikinci günün taraması ilk tahminleri üretir. Kod `firsat-paneli` dalında; bölüm 12'nin değişiklikleri henüz commit edilmedi. Apify bu dönem (5 Eki – 4 Kas) $5'in $2.21'ini harcadı; bölüm 12'nin dört ücretli denemesi toplam $0.07 tuttu (üçü sonuçsuz $0.0025, Trendyol'a özel aktör $0.07).
+
+Sıradaki adımlar: (1) amazon.com.tr engelinin sürüp sürmediğine bakmak, sürerse aramaları yavaşlatmak; 209 ürünün kalan 189'una bakmak (koşu başına 20 ürün; her gün `node worker/tr-check.js`) ve "bulunamadı" çıkıp çıkmadığını görmek, (2) birkaç gün `--free` taraması biriktirip ivme uçlarını gerçek veriyle görmek, (3) "yeni çıkanlar" listesini bağlamak, (4) Trendyol doğrulamasını (arama başına ≈ $0.07) "bulunamadı" çıkan ürünler için koda bağlamak; yapay zekâ katmanı açılmadan anlamı yok.

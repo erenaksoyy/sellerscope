@@ -13,6 +13,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { createHandler } from "../api/handler.js";
 import { runDigest } from "../worker/digest.js";
+import { runTrCheck } from "../worker/tr-check.js";
 import { ABROAD_MARKETPLACES } from "../worker/config.js";
 
 const run = promisify(execFile);
@@ -137,13 +138,21 @@ test("şema + göçler + seed geçici şemaya kurulur", { skip }, async () => {
             (SELECT COUNT(*)::int FROM marketplaces) AS marketplaces,
             (SELECT COUNT(*)::int FROM categories) AS categories`
   );
-  assert.deepEqual(rows[0], { schema: SCHEMA, marketplaces: 5, categories: 10 });
+  assert.deepEqual(rows[0], { schema: SCHEMA, marketplaces: 5, categories: 12 });
   const client = await pool.connect();
   try {
-    assert.equal((await db.loadTargets(client)).length, 10);
+    assert.equal((await db.loadTargets(client)).length, 12);
   } finally {
     client.release();
   }
+  // Her kategorinin ülkeler arası ortak anahtarı var (seed ve göç 003 aynı sonucu verir).
+  const groups = await pool.query(
+    `SELECT group_slug, COUNT(*)::int AS n FROM categories GROUP BY group_slug ORDER BY group_slug`
+  );
+  assert.deepEqual(groups.rows, [
+    { group_slug: "elektronik", n: 4 }, { group_slug: "ev-mutfak", n: 5 },
+    { group_slug: "oyuncak", n: 2 }, { group_slug: "spor-outdoor", n: 1 },
+  ]);
 });
 
 test("upsertProduct: önceki yorum sayısı, bilinmeyen sayı son değeri ezmez", { skip }, async () => {
@@ -268,7 +277,7 @@ test("cron (mock veri): ilk gün 0 satış, ertesi gün yorum artışı x katsay
 test("GET /api/categories", { skip }, async () => {
   const res = await get("/api/categories?marketplace=amazon_de");
   assert.equal(res.status, 200);
-  assert.deepEqual(res.body.data.map((c) => c.slug), ["elektronik", "ev-mutfak", "spor-outdoor"]);
+  assert.deepEqual(res.body.data.map((c) => c.slug), ["elektronik", "ev-mutfak", "oyuncak", "spor-outdoor"]);
   assert.equal((await get("/api/categories?marketplace=yok")).status, 404);
 });
 
@@ -349,6 +358,157 @@ test("GET /api/explosions: sıralama, yeni ürün, sıra sıçraması, eşikler"
   assert.deepEqual(abroad.body.meta.marketplaces, ABROAD_MARKETPLACES);
   assert.equal(abroad.body.data.length, 4);
   assert.ok(abroad.body.data.every((p) => ABROAD_MARKETPLACES.includes(p.marketplace)));
+});
+
+// --- Türkiye karşılaştırması ---
+
+test("kur: yurt dışı fiyatı TL'ye çevrilir (en güncel kur)", { skip }, async () => {
+  const before = await get(`/api/products/${ids.rising}`);
+  assert.equal(before.body.price_try, null); // kur yokken çevrilemez
+  const client = await pool.connect();
+  try {
+    await db.upsertFxRates(client, "2026-01-01", { EUR: 10 });
+    await db.upsertFxRates(client, today, { EUR: 50.5, USD: 40 });
+    await db.upsertFxRates(client, today, { EUR: 50.5 }); // aynı gün tekrar: çift satır yok
+    assert.deepEqual(await db.latestFxRates(client), { EUR: 50.5, USD: 40 });
+  } finally {
+    client.release();
+  }
+  const list = await get("/api/products?marketplace=amazon_de&category=ev-mutfak");
+  assert.deepEqual(list.body.data.map((p) => [p.price, p.price_try]), [[30, 1515], [50, 2525], [80, 4040], [120, 6060]]);
+  assert.ok(list.body.data.every((p) => p.tr_status === "unchecked" && p.tr_match_count === 0));
+  assert.equal((await get(`/api/products/${ids.rising}`)).body.price_try, 1515);
+});
+
+test("tr-check: sonuçlar yazılır; API süzer; elle karar otomatik kontrolde korunur", { skip }, async () => {
+  const hit = (title, price, source = "amazon_tr") => ({
+    source, title, url: `https://tr.example/${encodeURIComponent(title)}`, price, imageUrl: null, sellerName: null,
+  });
+  // Yapay zekâ ve arama sahte: Yeni ürün TR'de yok, Yükselen aynısı var,
+  // Sabit'in benzeri var, Sayısı bilinmeyen için siteler yanıt vermiyor.
+  const ai = {
+    queries: async (products) => new Map(products.map((p) => [p.id, {
+      exact: p.title === "Sabit ürün" ? "Marka Sabit" : null, generic: `tr ${p.title}`,
+    }])),
+    judge: async (p) => (p.title === "Yükselen ürün"
+      ? { status: "found", kinds: ["same", "different"] }
+      : { status: "similar", kinds: ["similar", "similar"] }),
+  };
+  const search = async (query) => {
+    const ok = { searched: ["amazon_tr", "hepsiburada_tr"], failed: [] };
+    if (query === "tr Yeni ürün") return { results: [], ...ok };
+    if (query === "tr Yükselen ürün") return { results: [hit("Test Yükselen ürün TR", 2000), hit("Alakasız kılıf", 5)], ...ok };
+    if (query === "Marka Sabit") return { results: [hit("Benzer A", 900)], ...ok };
+    if (query === "tr Sabit ürün") return { results: [hit("Benzer A", 900), hit("Benzer B", 700, "hepsiburada_tr")], ...ok };
+    return { results: [], searched: [], failed: [{ code: "amazon_tr", blocked: false, message: "arama sayfası tanınmadı" }] };
+  };
+  const check = async () => {
+    const client = await pool.connect();
+    try {
+      return await runTrCheck({ db, client, codes: ["amazon_de"], limit: 10, search, ai, delayMs: 0, log: () => {} });
+    } finally {
+      client.release();
+    }
+  };
+
+  assert.deepEqual(await check(), { candidates: 4, found: 1, similar: 1, not_found: 1, unknown: 0, failed: 1 });
+  const rows = await pool.query(
+    `SELECT p.title, t.status, t.rule_status, t.ai_status, t.query, t.sources, t.match_count, t.min_price
+     FROM tr_checks t JOIN products p ON p.id = t.product_id ORDER BY p.bestseller_rank`
+  );
+  const both = ["amazon_tr", "hepsiburada_tr"];
+  assert.deepEqual(rows.rows, [
+    { title: "Yeni ürün", status: "not_found", rule_status: null, ai_status: "not_found", query: "tr Yeni ürün", sources: both, match_count: 0, min_price: null },
+    { title: "Yükselen ürün", status: "found", rule_status: "found", ai_status: "found", query: "tr Yükselen ürün", sources: both, match_count: 1, min_price: 2000 },
+    { title: "Sabit ürün", status: "similar", rule_status: null, ai_status: "similar", query: "Marka Sabit | tr Sabit ürün", sources: both, match_count: 2, min_price: 700 },
+  ]);
+  // Bakılanlara 30 gün dolmadan yeniden bakılmaz; aranamayan ürün aday kalır.
+  assert.deepEqual(await check(), { candidates: 1, found: 0, similar: 0, not_found: 0, unknown: 0, failed: 1 });
+
+  // API: fırsat listesi, süzgeçler, ürün detayındaki TR ilanları.
+  const opp = await get("/api/opportunities?marketplace=amazon_de");
+  assert.deepEqual(opp.body.data.map((p) => [p.title, p.tr_status, p.price_try, p.group]), [["Yeni ürün", "not_found", 4040, "ev-mutfak"]]);
+  assert.deepEqual([opp.body.meta.tr, opp.body.meta.sort], ["not_found", "rank"]);
+  assert.deepEqual(titles(await get("/api/opportunities?marketplace=amazon_de&tr=all")),
+    ["Yeni ürün", "Yükselen ürün", "Sabit ürün", "Sayısı bilinmeyen ürün"]); // pazaryeri sırası: 3, 5, 10, 40
+  assert.deepEqual(titles(await get("/api/opportunities?tr=all&group=oyuncak")), []);
+  assert.deepEqual(titles(await get("/api/explosions?marketplace=amazon_de&tr=found")), ["Yükselen ürün"]);
+  assert.deepEqual(titles(await get("/api/products?marketplace=amazon_de&category=ev-mutfak&tr=similar")), ["Sabit ürün"]);
+  assert.deepEqual(titles(await get("/api/products?marketplace=amazon_de&category=ev-mutfak&tr=unchecked")), ["Sayısı bilinmeyen ürün"]);
+  const similar = (await get("/api/products?marketplace=amazon_de&category=ev-mutfak&tr=similar")).body.data[0];
+  assert.deepEqual([similar.tr_min_price, similar.tr_match_count, similar.tr_checked_on], [700, 2, today]);
+
+  const detail = (await get(`/api/products/${ids.steady}`)).body;
+  assert.deepEqual([detail.tr.status, detail.tr.query, detail.tr.sources, detail.tr.checked_on], ["similar", "Marka Sabit | tr Sabit ürün", both, today]);
+  assert.deepEqual(detail.tr.matches.map((m) => [m.source, m.kind, m.title, m.price]), [
+    ["hepsiburada_tr", "similar", "Benzer B", 700], ["amazon_tr", "similar", "Benzer A", 900],
+  ]);
+  assert.deepEqual((await get(`/api/products/${ids.unknown}`)).body.tr, { status: "unchecked", matches: [] });
+
+  // İnsan katmanı: yalnız yönetici. İnceleme kuyruğunda "yok" denen ürün bekler.
+  const post = (path, body) => handle({ method: "POST", path, headers: {}, body });
+  const put = (id, body, headers) => handle({ method: "PUT", path: `/api/products/${id}/tr-status`, headers, body });
+  const tokenOf = async (email) => (await post("/api/auth/register", { email, password: "gizli-sifre-1" })).body.token;
+  const member = { authorization: `Bearer ${await tokenOf("sade-uye@example.com")}` };
+  const admin = { authorization: `Bearer ${await tokenOf("yonetici@example.com")}` };
+  await pool.query(`UPDATE users SET is_admin = TRUE WHERE email = 'yonetici@example.com'`);
+
+  assert.equal((await put(ids.fresh, { status: "found" }, member)).status, 403);
+  assert.equal((await get("/api/tr-review", member)).status, 403);
+  const queue = await get("/api/tr-review", admin);
+  assert.deepEqual(queue.body.data.map((p) => [p.title, p.reason, p.ai_status]), [["Yeni ürün", "ai_not_found", "not_found"]]);
+
+  const fixed = await put(ids.fresh, { status: "found", note: "Trendyol'da var" }, admin);
+  assert.deepEqual(fixed.body, { ok: true, tr_status: "found" });
+  assert.deepEqual(titles(await get("/api/opportunities?marketplace=amazon_de")), []);
+  assert.deepEqual((await get("/api/tr-review", admin)).body.data, []);
+
+  // Süresi dolunca yeniden bakılır: yapay zekâ yine "yok" der, elle karar kalır.
+  await pool.query(`UPDATE tr_checks SET checked_at = now() - interval '40 days' WHERE product_id = $1`, [ids.fresh]);
+  assert.deepEqual(await check(), { candidates: 2, found: 1, similar: 0, not_found: 0, unknown: 0, failed: 1 });
+  const kept = (await get(`/api/products/${ids.fresh}`)).body.tr;
+  assert.deepEqual([kept.status, kept.human_status, kept.ai_status, kept.human_note], ["found", "found", "not_found", "Trendyol'da var"]);
+
+  // Karar kaldırılınca otomatik sonuca dönülür.
+  assert.deepEqual((await put(ids.fresh, { status: null }, admin)).body, { ok: true, tr_status: "not_found" });
+  assert.deepEqual(titles(await get("/api/opportunities?marketplace=amazon_de")), ["Yeni ürün"]);
+
+  // Hiç otomatik bakılmamış ürüne elle karar: yazılır, kaldırılınca iz kalmaz.
+  assert.equal((await put(ids.unknown, { status: "similar" }, admin)).body.tr_status, "similar");
+  assert.equal((await get(`/api/products/${ids.unknown}`)).body.tr.status, "similar");
+  assert.equal((await put(ids.unknown, { status: null }, admin)).body.tr_status, "unchecked");
+
+  // Yapay zekâsız bakılmış ürün, yapay zekâ açıkken 20 saat sonra yeniden aday olur.
+  await pool.query(
+    `UPDATE tr_checks SET ai_status = NULL, checked_at = now() - interval '21 hours' WHERE product_id = $1`,
+    [ids.steady]
+  );
+  const candidates = async (retryNoAi) => {
+    const client = await pool.connect();
+    try {
+      const found = await db.loadTrCandidates(client, { codes: ["amazon_de"], limit: 10, recheckDays: 30, retryNoAi });
+      return found.map((p) => p.title);
+    } finally {
+      client.release();
+    }
+  };
+  assert.deepEqual(await candidates(false), ["Sayısı bilinmeyen ürün"]);
+  assert.deepEqual(await candidates(true), ["Sayısı bilinmeyen ürün", "Sabit ürün"]);
+});
+
+test("GET /api/markets: pazaryerleri, kategoriler, ürün sayısı, son çekim", { skip }, async () => {
+  const res = await get("/api/markets");
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.data.map((m) => [m.code, m.country, m.abroad]), [
+    ["aliexpress_global", "GL", true], ["amazon_de", "DE", true], ["amazon_tr", "TR", false],
+    ["amazon_us", "US", true], ["trendyol_tr", "TR", false],
+  ]);
+  const deMarket = res.body.data[1];
+  assert.deepEqual([deMarket.name, deMarket.currency], ["Amazon Almanya", "EUR"]);
+  assert.deepEqual(deMarket.categories.map((c) => [c.slug, c.group, c.product_count, c.last_fetched_on]), [
+    ["elektronik", "elektronik", 0, null], ["ev-mutfak", "ev-mutfak", 4, today],
+    ["oyuncak", "oyuncak", 0, null], ["spor-outdoor", "spor-outdoor", 0, null],
+  ]);
 });
 
 // --- üyelik + haftalık özet ---

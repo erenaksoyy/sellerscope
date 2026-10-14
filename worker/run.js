@@ -4,15 +4,21 @@
 //   REAL_FETCH=1 node worker/run.js               -> gerçek çekim (Apify, ücretli)
 //   node worker/run.js --marketplace=amazon_de    -> tek pazaryerine indirgeme
 //   node worker/run.js --abroad                   -> yalnız yurt dışı hedefler (sık çekim için)
+//   node worker/run.js --free                     -> yalnız ücretsiz (doğrudan) çekilen pazaryerleri
 
 import "./env.js";
-import { MARKETPLACES, CATEGORIES, FETCH_LIMIT, ABROAD_MARKETPLACES } from "./config.js";
+import {
+  MARKETPLACES, CATEGORIES, FETCH_LIMIT, ABROAD_MARKETPLACES, DIRECT_LIST_MARKETPLACES,
+} from "./config.js";
 import { fetchCategoryProducts } from "./fetchers.js";
 import { estimateDailySales, reviewDelta } from "./estimate.js";
+import { fetchRates } from "./fx.js";
 
 const argv = process.argv.slice(2);
 const dryRun = argv.includes("--dry-run");
 const abroadOnly = argv.includes("--abroad");
+// --free: gerçek çekimde Apify'a (ücretli) hiç gidilmez.
+const freeOnly = argv.includes("--free");
 const onlyArg = argv.find((a) => a.startsWith("--marketplace="));
 const onlyMarketplace = onlyArg ? onlyArg.split("=")[1] : null;
 const dayIndex = Math.floor(Date.now() / 86400000);
@@ -26,11 +32,17 @@ if (onlyMarketplace && abroadOnly && !ABROAD_MARKETPLACES.includes(onlyMarketpla
   process.exit(1);
 }
 
+if (onlyMarketplace && freeOnly && !DIRECT_LIST_MARKETPLACES.includes(onlyMarketplace)) {
+  console.error(`--free ile yalnız ücretsiz çekilen pazaryeri seçilebilir: ${onlyMarketplace}`);
+  process.exit(1);
+}
+
 function targets() {
   // Dry-run: DB yok, config'den hedef listesi. Gerçek koşu: DB'den okunur.
-  const codes = onlyMarketplace
+  const all = onlyMarketplace
     ? [onlyMarketplace]
     : abroadOnly ? [...ABROAD_MARKETPLACES] : Object.keys(MARKETPLACES);
+  const codes = freeOnly ? all.filter((c) => DIRECT_LIST_MARKETPLACES.includes(c)) : all;
   return codes.flatMap((code) =>
     CATEGORIES[code].map((slug) => ({ marketplace_code: code, category_slug: slug }))
   );
@@ -96,9 +108,20 @@ async function runLive() {
     let targets = await db.loadTargets(client);
     if (onlyMarketplace) targets = targets.filter((t) => t.marketplace_code === onlyMarketplace);
     if (abroadOnly) targets = targets.filter((t) => ABROAD_MARKETPLACES.includes(t.marketplace_code));
+    if (freeOnly) targets = targets.filter((t) => DIRECT_LIST_MARKETPLACES.includes(t.marketplace_code));
     if (targets.length === 0) {
       console.error("Aktif hedef bulunamadı (marketplaces/categories seed edildi mi?)");
       process.exit(1);
+    }
+    if (process.env.REAL_FETCH === "1") {
+      // Günün kuru (fiyatları TL'ye çevirmek için). Alınamazsa çekim sürer.
+      try {
+        const { date, rates } = await fetchRates();
+        await db.upsertFxRates(client, date, rates);
+        console.log(`Kur (${date}): ${Object.entries(rates).map(([c, r]) => `1 ${c} = ${r} TL`).join(", ")}`);
+      } catch (err) {
+        console.warn(`UYARI: kur alınamadı: ${err.message}`);
+      }
     }
     let totalProducts = 0;
     let totalSales = 0;
